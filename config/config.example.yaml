@@ -1,0 +1,12 @@
+# Daybreak config — copy to config/config.yaml
+broker: ibkr            # ibkr (recommended: micro futures) | oanda (CFDs/practice)
+instruments: [MNQ, SPY, MYM]   # validated set; MNQ is the core edge
+target_R: null          # null => exit at the flatten time (tested best)
+poll_seconds: 15
+risk:
+  risk_per_trade: 0.005          # 0.5% of equity at the protective stop
+  max_daily_loss: 0.02           # halt the day at -2%
+  max_trades_per_day: 3
+  max_concurrent: 2
+  max_consecutive_losses: 6
+  kill_switch_file: KILL         # `touch KILL` on the VPS to halt instantly

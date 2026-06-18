@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+config/config.yaml
+state.json
+journal.csv
+backtest_out/
+KILL

@@ -1,0 +1,9 @@
+[project]
+name = "daybreak"
+version = "1.0.0"
+description = "Opening-Range Breakout execution bot (index futures)"
+requires-python = ">=3.10"
+dependencies = ["pandas>=2.0", "numpy>=1.24", "pyyaml>=6.0"]
+
+[project.scripts]
+daybreak = "scripts.run:main"

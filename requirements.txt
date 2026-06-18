@@ -1,0 +1,6 @@
+pandas>=2.0
+numpy>=1.24
+pyyaml>=6.0
+# live (install the venue you use):
+#   pip install ib_insync       # IBKR
+#   pip install oandapyV20      # OANDA
