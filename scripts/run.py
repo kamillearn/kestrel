@@ -45,7 +45,15 @@ if __name__ == "__main__":
         
         # Give IBKR 2 seconds to stream the account data back over the socket
         logging.info("Waiting for IBKR account synchronization...")
-        time.sleep(2) 
+        
+        # Fix for $0.00 bug: time.sleep() blocks the network event loop.
+        # We must use the asyncio-aware sleep if using ib_insync.
+        broker_name = cfg.broker.get("name", "").lower()
+        if broker_name == "ibkr":
+            import ib_insync
+            ib_insync.util.sleep(2.0)
+        else:
+            time.sleep(2.0)
         
         eq = broker.equity()
         logging.info(f"Pre-flight successful. Starting Equity: ${eq:,.2f}")
