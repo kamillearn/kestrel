@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from kestrel.utils.sessions import Session, US_EQUITY, EU_EQUITY, UK_EQUITY, HK_EQUITY, AU_EQUITY, ASIA_EQUITY
 
-
 @dataclass(frozen=True)
 class InstrumentSpec:
     key: str
@@ -14,6 +13,7 @@ class InstrumentSpec:
     session: Session = US_EQUITY
     ibkr_symbol: str | None = None
     oanda_symbol: str | None = None
+    ibkr_exchange: str = "CME" # THE FIX: Default to CME, allow overrides
 
 SPECS: dict[str, InstrumentSpec] = {
     # --- US MARKETS (Tier 1, Tier 2, & Backups) ---
@@ -50,18 +50,17 @@ SPECS: dict[str, InstrumentSpec] = {
     
     # FDXS (Micro DAX Index): €1 per point, 1.0 tick size
     "FDXS": InstrumentSpec("FDXS", point_value=1.0, tick=1.0, slippage=1.0,
-                           session=EU_EQUITY, ibkr_symbol="FDXS", oanda_symbol="DE30_EUR"),
+                           session=EU_EQUITY, ibkr_symbol="FDXS", oanda_symbol="DE30_EUR", ibkr_exchange="EUREX"),
 
     # DAX (Full DAX Index): €25 per point, 1.0 tick size
     "DAX":  InstrumentSpec("DAX", point_value=25.0, tick=1.0, slippage=1.0,
-                           session=EU_EQUITY, ibkr_symbol="DAX", oanda_symbol="DE30_EUR"),
-
+                           session=EU_EQUITY, ibkr_symbol="DAX", oanda_symbol="DE30_EUR", ibkr_exchange="EUREX"),
 
     # --- GLOBAL MARKET ALTERNATIVES ---
 
     # ESTX50 (Euro Stoxx 50 Index): €10 per point, 1.0 tick size
     "ESTX50": InstrumentSpec("ESTX50", point_value=10.0, tick=1.0, slippage=1.0,
-                             session=EU_EQUITY, ibkr_symbol="ESTX50"),
+                             session=EU_EQUITY, ibkr_symbol="ESTX50", ibkr_exchange="EUREX"),
 
     # Z (UK FTSE 100 Index): £10 per point, 0.5 tick size
     "Z":      InstrumentSpec("Z", point_value=10.0, tick=0.5, slippage=0.5,
