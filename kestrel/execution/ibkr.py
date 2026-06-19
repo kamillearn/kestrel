@@ -23,13 +23,21 @@ class IBKRBroker(Broker):
     def _contract(self, sym):
         from ib_insync import ContFuture, Stock
         if sym not in self._c:
-            c = Stock(sym, "SMART", "USD") if sym in ("SPY",) else ContFuture(sym, exchange="CME")
+            if sym in ("SPY",):
+                c = Stock(sym, "SMART", "USD")
+            else:
+                # THE FIX: Read the exchange from our SPECS registry!
+                exch = SPECS[sym].ibkr_exchange if sym in SPECS else "CME"
+                c = ContFuture(sym, exchange=exch)
+                
             self.ib.qualifyContracts(c); self._c[sym] = c
         return self._c[sym]
 
     def equity(self):
         for v in self.ib.accountValues():
-            if v.tag == "NetLiquidation" and v.currency == "USD": return float(v.value)
+            # THE FIX: Allow the engine to detect EUR account balances
+            if v.tag == "NetLiquidation" and v.currency in ("USD", "EUR", "BASE"): 
+                return float(v.value)
         return 0.0
 
     def recent_bars(self, instrument, count=800):
