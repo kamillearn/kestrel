@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kestrel — systematic desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#10151B; --bg2:#161D25; --panel:#19212A; --line:#2A343F;
+    --rust:#CC6B3C; --rust-soft:#E0894F; --slate:#7C97A8; --slateink:#5C7689;
+    --ink:#ECE6DA; --mute:#8A95A1; --faint:#5C6772;
+    --pos:#62B07C; --neg:#C2543F; --warn:#D9A24B;
+    --gold:#C9A24B;
+    --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+    --disp:'Space Grotesk',ui-sans-serif,system-ui,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{-webkit-text-size-adjust:100%}
+  body{background:radial-gradient(1200px 600px at 70% -10%,#1B242E 0%,var(--bg) 55%);
+    color:var(--ink);font-family:var(--mono);line-height:1.5;
+    padding:clamp(14px,3vw,34px);min-height:100vh}
+  .wrap{max-width:1080px;margin:0 auto}
+
+  /* header */
+  header{display:flex;align-items:flex-end;justify-content:space-between;
+    gap:16px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding-bottom:16px}
+  .brand{display:flex;align-items:center;gap:14px}
+  .glyph{width:34px;height:34px;flex:none}
+  .wordmark{font-family:var(--disp);font-weight:700;font-size:clamp(22px,4vw,30px);
+    letter-spacing:.14em;line-height:1}
+  .wordmark b{color:var(--rust)}
+  .tag{font-size:11px;color:var(--mute);letter-spacing:.18em;text-transform:uppercase;margin-top:5px}
+  .status{font-size:11px;color:var(--mute);text-align:right;letter-spacing:.04em}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--pos);
+    margin-right:6px;box-shadow:0 0 8px var(--pos)}
+  .status .src{color:var(--faint)}
+
+  /* hero curve */
+  .hero{margin-top:22px;background:linear-gradient(180deg,var(--bg2),var(--panel));
+    border:1px solid var(--line);border-radius:4px;overflow:hidden}
+  .hero-head{display:flex;justify-content:space-between;align-items:baseline;
+    padding:16px 18px 0;flex-wrap:wrap;gap:8px}
+  .hero-head .label{font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--mute)}
+  .hero-head .book{font-size:11px;color:var(--slate);letter-spacing:.06em}
+  .figure{font-family:var(--disp);font-weight:700;font-size:clamp(34px,7vw,52px);
+    letter-spacing:-.01em;padding:2px 18px 0;line-height:1.05}
+  .figure .from{color:var(--faint);font-weight:400;font-size:.42em;letter-spacing:.04em}
+  svg.curve{display:block;width:100%;height:auto}
+
+  /* stat strip */
+  .strip{display:grid;grid-template-columns:repeat(6,1fr);gap:1px;background:var(--line);
+    border:1px solid var(--line);border-top:none;border-radius:0 0 4px 4px;overflow:hidden}
+  .cell{background:var(--panel);padding:13px 14px}
+  .cell .k{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute)}
+  .cell .v{font-family:var(--disp);font-weight:500;font-size:clamp(16px,2.4vw,21px);margin-top:4px}
+  .cell .v.pos{color:var(--pos)} .cell .v.neg{color:var(--neg)}
+  @media(max-width:680px){.strip{grid-template-columns:repeat(3,1fr)}}
+
+  /* scoreboard */
+  .board{margin-top:26px}
+  .board h2{font-family:var(--disp);font-weight:500;font-size:15px;letter-spacing:.04em;
+    color:var(--ink);margin-bottom:3px}
+  .board .sub{font-size:11px;color:var(--mute);margin-bottom:14px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  thead th{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);
+    text-align:right;padding:0 10px 9px;font-weight:500;border-bottom:1px solid var(--line)}
+  thead th:first-child{text-align:left}
+  tbody td{padding:11px 10px;text-align:right;border-bottom:1px solid #20272F;white-space:nowrap}
+  tbody td:first-child{text-align:left}
+  .sym{font-family:var(--disp);font-weight:500;font-size:14px}
+  .desc{color:var(--faint);font-size:11px;margin-left:8px}
+  .pos{color:var(--pos)} .neg{color:var(--neg)} .mut{color:var(--mute)}
+  .bar{display:inline-block;height:6px;border-radius:1px;vertical-align:middle;margin-right:8px}
+  .tier{font-size:10px;letter-spacing:.1em;text-transform:uppercase;padding:3px 8px;
+    border-radius:2px;border:1px solid;font-family:var(--mono)}
+  .t-core{color:var(--rust);border-color:var(--rust)}
+  .t-solid{color:var(--pos);border-color:#33614a;background:#15241c}
+  .t-prob{color:var(--gold);border-color:#5a4d24}
+  .t-watch{color:var(--slate);border-color:var(--slateink)}
+  .t-marg{color:var(--mute);border-color:var(--line)}
+  .deadrow td{color:var(--faint);padding:14px 10px 0;font-size:11px;border:none}
+
+  /* honesty */
+  .honest{margin-top:26px;border:1px solid var(--line);border-left:3px solid var(--rust);
+    border-radius:3px;background:linear-gradient(180deg,#1a1612,#171c22);padding:16px 18px}
+  .honest h3{font-family:var(--disp);font-weight:500;font-size:13px;letter-spacing:.06em;
+    color:var(--rust-soft);text-transform:uppercase;margin-bottom:8px}
+  .honest ul{list-style:none;display:grid;grid-template-columns:1fr 1fr;gap:7px 26px}
+  .honest li{font-size:12px;color:var(--mute);padding-left:16px;position:relative}
+  .honest li::before{content:"—";position:absolute;left:0;color:var(--faint)}
+  .honest li b{color:var(--ink);font-weight:500}
+  @media(max-width:680px){.honest ul{grid-template-columns:1fr}}
+
+  footer{margin-top:22px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;
+    font-size:11px;color:var(--faint);letter-spacing:.04em;border-top:1px solid var(--line);padding-top:14px}
+  @media(prefers-reduced-motion:no-preference){
+    .draw{stroke-dasharray:var(--len);stroke-dashoffset:var(--len);animation:dr 1.6s ease-out forwards}
+    @keyframes dr{to{stroke-dashoffset:0}}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <svg class="glyph" viewBox="0 0 40 40" fill="none" aria-hidden="true">
+        <path d="M20 3 L31 19 Q33 23 28 24 L23 25 L26 37 L20 30 L14 37 L17 25 L12 24 Q7 23 9 19 Z"
+          fill="#CC6B3C" opacity="0.92"/>
+        <path d="M20 9 L20 30" stroke="#10151B" stroke-width="1.4" opacity="0.5"/>
+      </svg>
+      <div>
+        <div class="wordmark">KES<b>T</b>REL</div>
+        <div class="tag">opening-range breakout · index futures</div>
+      </div>
+    </div>
+    <div class="status">
+      <div><span class="dot"></span>backtest validated</div>
+      <div class="src">MNQ + SPY + MYM · 0.5% risk/trade · Dec 2021 – Jun 2026</div>
+    </div>
+  </header>
+
+  <!-- HERO: the equity curve is the thesis -->
+  <section class="hero">
+    <div class="hero-head">
+      <span class="label">Account equity · €10,000 start · compounded</span>
+      <span class="book">year-end path, modelled fills</span>
+    </div>
+    <div class="figure"><span class="from">€10,000 →&nbsp;</span><span id="finalEq">€35,509</span></div>
+    <svg class="curve" id="chart" viewBox="0 0 1000 280" preserveAspectRatio="none" aria-label="equity curve"></svg>
+  </section>
+
+  <div class="strip" id="strip"></div>
+
+  <!-- SCOREBOARD: structure encodes the statistical verdict -->
+  <section class="board">
+    <h2>Instrument scoreboard</h2>
+    <div class="sub">Per-trade expectancy in R (risk = opening-range width). Tier = how much the evidence actually supports it, not the headline return.</div>
+    <table>
+      <thead><tr>
+        <th>Instrument</th><th>Expectancy</th><th>Profit factor</th><th>Total&nbsp;R</th><th>t-stat</th><th>Verdict</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </section>
+
+  <section class="honest">
+    <h3>What this is — and isn't</h3>
+    <ul>
+      <li><b>In-sample.</b> Backtest, not a live track record.</li>
+      <li><b>Fills are modelled.</b> Real breakout fills run worse; verify on paper.</li>
+      <li><b>The edge is thin.</b> ~+0.09R/trade across the book — it compounds, it doesn't print.</li>
+      <li><b>It's decaying.</b> Annual returns trend down; plan for less, not more.</li>
+      <li><b>Drawdowns are real.</b> 17.6% realized; bootstrap tail ~25–30%.</li>
+      <li><b>Not "$847 overnight."</b> No single night proves anything. Not financial advice.</li>
+    </ul>
+  </section>
+
+  <footer>
+    <span>KESTREL · Claude-built systematic desk</span>
+    <span>one validated edge: the 09:30 cash-open range, strongest on Nasdaq</span>
+  </footer>
+</div>
+
+<script>
+const CURVE = [["2021-12-16", 10087.2], ["2022-01-11", 10078.9], ["2022-02-04", 10029.5], ["2022-03-03", 10139.7], ["2022-03-28", 10421.0], ["2022-04-22", 10750.4], ["2022-05-17", 10876.5], ["2022-06-13", 11101.0], ["2022-07-08", 10944.9], ["2022-08-03", 11583.3], ["2022-08-26", 11234.3], ["2022-09-22", 11341.7], ["2022-10-18", 11879.6], ["2022-11-11", 11630.2], ["2022-12-07", 11689.9], ["2023-01-04", 12003.2], ["2023-01-30", 11743.9], ["2023-02-24", 11274.2], ["2023-03-21", 11850.4], ["2023-04-17", 12087.1], ["2023-05-10", 12481.3], ["2023-06-05", 13720.3], ["2023-06-28", 13578.8], ["2023-07-24", 13244.5], ["2023-08-16", 13834.8], ["2023-09-12", 13619.1], ["2023-10-03", 14054.2], ["2023-10-18", 16207.5], ["2023-11-01", 16563.7], ["2023-11-13", 17557.7], ["2023-11-27", 17138.3], ["2023-12-06", 17318.7], ["2023-12-14", 18101.6], ["2023-12-22", 17512.9], ["2024-01-03", 17498.2], ["2024-01-11", 17732.7], ["2024-01-22", 18351.6], ["2024-01-29", 17207.3], ["2024-02-06", 17802.1], ["2024-02-14", 17765.7], ["2024-02-23", 17212.1], ["2024-03-04", 17552.6], ["2024-03-12", 16746.6], ["2024-03-19", 17000.0], ["2024-03-27", 16846.8], ["2024-04-05", 17748.5], ["2024-04-15", 19329.2], ["2024-04-23", 19606.5], ["2024-05-01", 18924.4], ["2024-05-09", 18642.9], ["2024-05-17", 19051.8], ["2024-05-24", 19101.7], ["2024-06-04", 18347.0], ["2024-06-12", 18655.7], ["2024-06-21", 19368.6], ["2024-07-01", 18558.0], ["2024-07-09", 18710.0], ["2024-07-17", 18700.9], ["2024-07-25", 18578.0], ["2024-08-02", 19585.7], ["2024-08-12", 20019.7], ["2024-08-20", 19627.8], ["2024-08-28", 20398.1], ["2024-09-06", 20248.2], ["2024-09-13", 20243.9], ["2024-09-23", 18737.7], ["2024-10-01", 17942.3], ["2024-10-09", 17927.5], ["2024-10-17", 19858.1], ["2024-10-25", 20264.6], ["2024-11-01", 20049.9], ["2024-11-11", 20341.0], ["2024-11-19", 21751.8], ["2024-11-27", 21256.0], ["2024-12-06", 21056.0], ["2024-12-16", 21883.1], ["2024-12-23", 21845.0], ["2025-01-02", 22413.6], ["2025-01-13", 22876.3], ["2025-01-22", 22454.0], ["2025-01-30", 23592.1], ["2025-02-07", 23424.8], ["2025-02-14", 24807.0], ["2025-02-25", 25106.8], ["2025-03-05", 25057.2], ["2025-03-13", 24323.2], ["2025-03-21", 24209.3], ["2025-03-28", 25379.3], ["2025-04-07", 27666.4], ["2025-04-15", 27789.5], ["2025-04-24", 27575.3], ["2025-05-02", 27258.8], ["2025-05-12", 26577.1], ["2025-05-19", 27327.3], ["2025-05-28", 27269.6], ["2025-06-05", 26072.5], ["2025-06-13", 24879.7], ["2025-06-24", 23755.3], ["2025-07-02", 23892.5], ["2025-07-10", 24171.1], ["2025-07-18", 24612.4], ["2025-07-28", 23770.3], ["2025-08-05", 24476.1], ["2025-08-13", 24898.7], ["2025-08-21", 24115.9], ["2025-08-28", 25398.3], ["2025-09-08", 25483.1], ["2025-09-16", 25093.5], ["2025-09-24", 25761.9], ["2025-10-02", 25070.5], ["2025-10-10", 26974.0], ["2025-10-17", 28307.4], ["2025-10-27", 29612.1], ["2025-11-04", 28598.6], ["2025-11-12", 28424.2], ["2025-11-20", 28369.3], ["2025-12-01", 28844.2], ["2025-12-09", 29153.3], ["2025-12-16", 30500.5], ["2025-12-24", 30760.8], ["2026-01-05", 30685.0], ["2026-01-13", 31070.8], ["2026-01-21", 30679.0], ["2026-01-29", 30251.1], ["2026-02-06", 31180.0], ["2026-02-17", 32732.2], ["2026-02-25", 33163.0], ["2026-03-05", 33248.1], ["2026-03-12", 32248.8], ["2026-03-20", 34566.2], ["2026-03-30", 34126.3], ["2026-04-08", 33143.4], ["2026-04-16", 35086.5], ["2026-04-24", 34979.9], ["2026-05-01", 34593.0], ["2026-05-11", 34773.8], ["2026-05-19", 34404.4], ["2026-05-28", 33396.2], ["2026-06-05", 34863.0], ["2026-06-15", 35509.1]];
+const ROWS = [
+  {s:"MNQ", d:"micro Nasdaq", exp:0.213, pf:1.50, tot:143.8, t:2.91, tier:"core",  tlabel:"Core edge"},
+  {s:"NQ",  d:"E-mini Nasdaq", exp:0.138, pf:1.34, tot:80.8, t:2.68, tier:"core",  tlabel:"Core edge"},
+  {s:"SPY", d:"S&P 500 ETF",   exp:0.091, pf:1.18, tot:102.2, t:2.12, tier:"solid", tlabel:"Solid"},
+  {s:"DAX", d:"Frankfurt 09:00", exp:0.171, pf:1.27, tot:98.9, t:2.14, tier:"prob", tlabel:"Probable"},
+  {s:"RTY", d:"Russell 2000",  exp:0.072, pf:1.19, tot:42.5, t:1.37, tier:"watch", tlabel:"Not proven"},
+  {s:"ES",  d:"E-mini S&P",    exp:0.069, pf:1.14, tot:40.6, t:1.23, tier:"watch", tlabel:"Not proven"},
+  {s:"MYM", d:"micro Dow",     exp:0.034, pf:1.08, tot:21.2, t:0.60, tier:"marg",  tlabel:"Marginal"},
+];
+const DEAD = "No edge — dropped: Euro Stoxx 50 · FTSE 100 · Hang Seng · Nikkei · gold · silver · FX majors · Bitcoin · single stocks";
+
+// ---- stat strip ----
+const cagr = (Math.pow(35509/10000, 1/4.5)-1)*100;
+const strip = [
+  ["Final equity","€35,509","pos"],["Total return","+255%","pos"],
+  ["CAGR (approx)", cagr.toFixed(0)+"%","pos"],["Max drawdown","17.6%","neg"],
+  ["Trades","2,431",""],["Profit factor","1.30",""]
+];
+document.getElementById('strip').innerHTML = strip.map(c=>
+  `<div class="cell"><div class="k">${c[0]}</div><div class="v ${c[2]}">${c[1]}</div></div>`).join('');
+
+// ---- scoreboard ----
+const tierClass={core:"t-core",solid:"t-solid",prob:"t-prob",watch:"t-watch",marg:"t-marg"};
+const maxTot=Math.max(...ROWS.map(r=>r.tot));
+document.getElementById('rows').innerHTML = ROWS.map(r=>{
+  const w=Math.max(6, r.tot/maxTot*70);
+  const tcol = r.t>=2.5 ? "pos" : (r.t>=2 ? "pos" : "mut");
+  return `<tr>
+    <td><span class="sym">${r.s}</span><span class="desc">${r.d}</span></td>
+    <td class="pos">+${r.exp.toFixed(3)}R</td>
+    <td>${r.pf.toFixed(2)}</td>
+    <td><span class="bar" style="width:${w}px;background:var(--rust);opacity:.55"></span><span class="pos">+${r.tot.toFixed(1)}</span></td>
+    <td class="${tcol}">${r.t.toFixed(2)}</td>
+    <td><span class="tier ${tierClass[r.tier]}">${r.tlabel}</span></td>
+  </tr>`;
+}).join('') + `<tr class="deadrow"><td colspan="6">${DEAD}</td></tr>`;
+
+// ---- equity curve (hand-drawn SVG) ----
+(function(){
+  const W=1000,H=280,padT=16,padB=20;
+  const ys=CURVE.map(p=>p[1]);
+  const lo=Math.min(...ys)*0.985, hi=Math.max(...ys)*1.01;
+  const x=i=>i/(CURVE.length-1)*W;
+  const y=v=>padT+(1-(v-lo)/(hi-lo))*(H-padT-padB);
+  let d="", area="";
+  CURVE.forEach((p,i)=>{const X=x(i).toFixed(1),Y=y(p[1]).toFixed(1);
+    d+=(i?"L":"M")+X+" "+Y+" "; area+=(i?"L":"M")+X+" "+Y+" ";});
+  area+=`L${W} ${H-padB} L0 ${H-padB} Z`;
+  // year gridlines
+  let ticks="";
+  let lastY=null;
+  CURVE.forEach((p,i)=>{const yr=p[0].slice(0,4);
+    if(yr!==lastY){lastY=yr;const X=x(i);
+      ticks+=`<line x1="${X}" y1="0" x2="${X}" y2="${H-padB}" stroke="#222B34" stroke-width="1"/>
+              <text x="${X+5}" y="${H-7}" fill="#5C6772" font-size="11" font-family="IBM Plex Mono">${yr}</text>`;}});
+  const len=2400;
+  document.getElementById('chart').innerHTML=`
+    <defs>
+      <linearGradient id="fill" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#CC6B3C" stop-opacity="0.30"/>
+        <stop offset="100%" stop-color="#CC6B3C" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+    ${ticks}
+    <path d="${area}" fill="url(#fill)"/>
+    <path d="${d}" fill="none" stroke="#E0894F" stroke-width="2"
+      class="draw" style="--len:${len}" vector-effect="non-scaling-stroke"/>`;
+})();
+</script>
+</body>
+</html>

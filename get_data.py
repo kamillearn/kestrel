@@ -1,0 +1,176 @@
+import csv
+import os
+import sys
+import time as _time
+from datetime import datetime, timezone, timedelta
+import requests
+
+# ============== CONFIG — EDIT THESE ==============
+# Token falls back to environment variable so it never lives in the source:
+#   macOS/Linux:  export OANDA_API_TOKEN="your-practice-token"
+#   Windows CMD:  set OANDA_API_TOKEN=your-practice-token
+#   Windows PS:   $env:OANDA_API_TOKEN="your-practice-token"
+OANDA_API_TOKEN = os.environ.get("OANDA_API_TOKEN", "74b9e1a30078c201024aa54928970d8e-063f58b86fff21e6775359fdfdf3fa61")
+ENVIRONMENT = "practice"
+GRANULARITY = "M1"                # 5-minute candles (change as needed)
+START       = "2022-01-01T00:00:00Z"
+END         = "2026-06-18T00:00:00Z"
+PRICE       = "BA"                # "BA" = bid & ask candles → allows spread calculation
+
+# (OANDA instrument name, output CSV). Instrument names verified against OANDA's
+# /instruments list — confirm yours with: python fetch_oanda.py --list
+INSTRUMENTS = [
+    ("XAG_USD",    "XAGUSD_M5.csv"),
+    "NAS100_USD",   "NAS100_USD.csv"
+    "DE30_EUR",     "DE30_EUR.csv"
+    "SPX500_USD",   "SPX500_USD.csv"
+    "US2000_USD",   "US2000_USD.csv"
+]
+# =================================================
+
+HOST = "https://api-fxpractice.oanda.com" if ENVIRONMENT == "practice" else "https://api-fxtrade.oanda.com"
+HEADERS = {"Authorization": f"Bearer {OANDA_API_TOKEN}"}
+MAX_COUNT = 5000
+
+
+def to_dt(s):
+    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def granularity_to_minutes(gran: str) -> int:
+    if gran.startswith('M'):
+        return int(gran[1:])
+    elif gran.startswith('H'):
+        return int(gran[1:]) * 60
+    elif gran.startswith('D'):
+        return 1440
+    elif gran.startswith('W'):
+        return 10080
+    else:
+        return int(gran)
+
+
+def list_instruments():
+    """Print the authoritative, account-specific tradeable-instrument list."""
+    acc = requests.get(f"{HOST}/v3/accounts", headers=HEADERS, timeout=30)
+    acc.raise_for_status()
+    account_id = acc.json()["accounts"][0]["id"]
+    r = requests.get(f"{HOST}/v3/accounts/{account_id}/instruments", headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    insts = sorted(r.json()["instruments"], key=lambda x: (x["type"], x["name"]))
+    print(f"Account {account_id} — {len(insts)} instruments\n")
+    print(f"{'name':16}{'type':12}displayName")
+    print("-" * 50)
+    for i in insts:
+        print(f"{i['name']:16}{i['type']:12}{i.get('displayName', '')}")
+
+
+def fetch(instrument, output_file):
+    """Fetch candles for a single instrument and write to CSV."""
+    print(f"\n=== Fetching {instrument} -> {output_file} ===")
+    rows = []
+    cursor = to_dt(START)
+    end_dt = to_dt(END)
+    request_no = 0
+    step_minutes = granularity_to_minutes(GRANULARITY)
+    url = f"{HOST}/v3/instruments/{instrument}/candles"
+
+    while cursor < end_dt:
+        params = {
+            "granularity": GRANULARITY,
+            "price": PRICE,
+            "from": cursor.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "count": MAX_COUNT,
+        }
+        try:
+            r = requests.get(url, headers=HEADERS, params=params, timeout=30)
+        except Exception as e:
+            print(f"  Request error: {e}")
+            break
+
+        if r.status_code != 200:
+            print(f"  ERROR {r.status_code}: {r.text[:200]}")
+            break
+
+        candles = r.json().get("candles", [])
+        if not candles:
+            print("  No more candles returned by API.")
+            break
+
+        new_last = None
+        for c in candles:
+            t = to_dt(c["time"][:19] + "Z")
+            if t >= end_dt:
+                break
+            if not c["complete"]:
+                continue
+
+            bid = c.get("bid")
+            ask = c.get("ask")
+            if not bid or not ask:
+                continue
+
+            # Midpoint OHLC
+            mid_open   = (float(bid["o"]) + float(ask["o"])) / 2.0
+            mid_high   = (float(bid["h"]) + float(ask["h"])) / 2.0
+            mid_low    = (float(bid["l"]) + float(ask["l"])) / 2.0
+            mid_close  = (float(bid["c"]) + float(ask["c"])) / 2.0
+            spread_points = float(ask["c"]) - float(bid["c"])
+
+            rows.append([
+                c["time"][:19].replace("T", " "),
+                round(mid_open, 5), round(mid_high, 5),
+                round(mid_low, 5), round(mid_close, 5),
+                int(c["volume"]),
+                round(spread_points, 5)
+            ])
+            new_last = t
+
+        request_no += 1
+        print(f"  request {request_no}: {len(candles)} candles processed, total kept {len(rows)}")
+
+        if new_last is None:
+            # Prevent infinite loop if API returns data but it doesn't advance past our cursor
+            break
+
+        # Advance cursor to the next expected candle slot after the last received block
+        cursor = new_last + timedelta(minutes=step_minutes)
+        _time.sleep(0.15)
+
+    # Write CSV after loop finishes execution to prevent performance overhead
+    if rows:
+        with open(output_file, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["time", "open", "high", "low", "close", "volume", "spread"])
+            w.writerows(rows)
+            print(f"  Wrote {len(rows)} candles to {output_file}")
+    else:
+        print(f"  No data fetched for {instrument}")
+
+
+def main():
+    if OANDA_API_TOKEN in [".....-.....", "PASTE_YOUR_NEW_TOKEN_HERE", ""]:
+        raise SystemExit("ERROR: Please set OANDA_API_TOKEN in your script config "
+                         "or export it as an environment variable first.")
+
+    # `python fetch_oanda.py --list` -> show what your account can actually pull
+    if "--list" in sys.argv:
+        list_instruments()
+        return
+
+    # Guard against two instruments writing to the same file (a silent overwrite)
+    outfiles = [o for _, o in INSTRUMENTS]
+    dupes = {o for o in outfiles if outfiles.count(o) > 1}
+    if dupes:
+        raise SystemExit(f"ERROR: duplicate output filenames {dupes} — "
+                         "each instrument needs its own CSV.")
+
+    print(f"Fetching {GRANULARITY} from {START} to {END} for {len(INSTRUMENTS)} instrument(s)...")
+    for instrument, outfile in INSTRUMENTS:
+        fetch(instrument, outfile)
+    
+    print("\nAll done.")
+
+
+if __name__ == "__main__":
+    main()
