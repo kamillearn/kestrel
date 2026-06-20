@@ -4,7 +4,8 @@ protective stop (and optional limit target). pip install ib_insync."""
 from __future__ import annotations
 import os
 import pandas as pd
-from kestrel.execution.broker import Broker, OcoBracket, Position
+from kestrel.execution.broker import (Broker, OcoBracket, Position,
+                                      BracketHandle, WorkingOrder, OrderKind)
 from kestrel.instruments import SPECS
 
 class IBKRBroker(Broker):
@@ -13,6 +14,9 @@ class IBKRBroker(Broker):
         self.port = int(port or os.getenv("IB_PORT", "4002"))
         self.client_id = int(client_id or os.getenv("IB_CLIENT_ID", "21"))
         self.ib = None; self._c = {}
+        # orderId(str) -> {"order": Order, "contract": Contract, "kind", "side"}
+        # so modify_stop / cancel_order can act on the exact ib_insync order object.
+        self._orders = {}
 
     def connect(self):
         from ib_insync import IB
@@ -51,24 +55,85 @@ class IBKRBroker(Broker):
     def place_oco(self, b: OcoBracket):
         from ib_insync import StopOrder, LimitOrder
         c = self._contract(b.instrument); q = int(round(b.qty))
-        if q <= 0: return []
-        oca = f"{b.tag}-{b.instrument}"; ids = []
-        for side, entry, stop, tgt in [("BUY", b.long_entry, b.long_stop, b.long_target),
-                                       ("SELL", b.short_entry, b.short_stop, b.short_target)]:
-            parent = StopOrder(side, q, entry)
+        handle = BracketHandle(instrument=b.instrument)
+        if q <= 0: return handle
+        oca = f"{b.tag}-{b.instrument}"
+        for side, action, entry, stop, tgt in [
+                ("long", "BUY", b.long_entry, b.long_stop, b.long_target),
+                ("short", "SELL", b.short_entry, b.short_stop, b.short_target)]:
+            # parent stop-entry, joined to the OCA group (first to fill cancels the other)
+            parent = StopOrder(action, q, entry)
             parent.ocaGroup = oca; parent.ocaType = 1; parent.transmit = False
-            p = self.ib.placeOrder(c, parent); ids.append(str(p.order.orderId))
-            opp = "SELL" if side == "BUY" else "BUY"
+            p = self.ib.placeOrder(c, parent); eid = str(p.order.orderId)
+            self._orders[eid] = {"order": parent, "contract": c,
+                                 "kind": OrderKind.ENTRY, "side": side}
+            opp = "SELL" if action == "BUY" else "BUY"
+            # protective stop (child of the entry) — capture its id this time
             sl = StopOrder(opp, q, stop); sl.parentId = parent.orderId
-            sl.transmit = tgt is None; self.ib.placeOrder(c, sl)
+            sl.transmit = tgt is None
+            s = self.ib.placeOrder(c, sl); sid = str(s.order.orderId)
+            self._orders[sid] = {"order": sl, "contract": c,
+                                 "kind": OrderKind.STOP, "side": side}
+            tid = None
             if tgt is not None:
                 tp = LimitOrder(opp, q, tgt); tp.parentId = parent.orderId
-                tp.transmit = True; self.ib.placeOrder(c, tp)
-        return ids
+                tp.transmit = True
+                t = self.ib.placeOrder(c, tp); tid = str(t.order.orderId)
+                self._orders[tid] = {"order": tp, "contract": c,
+                                     "kind": OrderKind.TARGET, "side": side}
+            if side == "long":
+                handle.long_entry_id, handle.long_stop_id, handle.long_target_id = eid, sid, tid
+            else:
+                handle.short_entry_id, handle.short_stop_id, handle.short_target_id = eid, sid, tid
+        return handle
 
     def open_orders(self, instrument):
         return [str(t.order.orderId) for t in self.ib.openTrades()
                 if t.contract.symbol == instrument]
+
+    def cancel_order(self, instrument, order_id):
+        """Cancel a single resting order, leaving its siblings (e.g. a live stop)
+        in place. Used by the time-decay cancel and software-OCO."""
+        rec = self._orders.get(str(order_id))
+        if rec is not None:
+            self.ib.cancelOrder(rec["order"]); return
+        for t in self.ib.openTrades():        # fallback: locate by orderId
+            if str(t.order.orderId) == str(order_id):
+                self.ib.cancelOrder(t.order); return
+
+    def modify_stop(self, instrument, stop_order_id, new_stop_price):
+        """Move a protective stop in place: re-transmit the SAME order object with
+        a new auxPrice. TWS treats a re-placed orderId as an amend, so there is no
+        cancel/replace gap where the position would sit unprotected."""
+        rec = self._orders.get(str(stop_order_id))
+        order = contract = None
+        if rec is not None:
+            order, contract = rec["order"], rec["contract"]
+        else:
+            for t in self.ib.openTrades():    # fallback: adopt the working order
+                if str(t.order.orderId) == str(stop_order_id):
+                    order, contract = t.order, t.contract; break
+        if order is None:
+            raise ValueError(f"unknown stop order {stop_order_id} for {instrument}")
+        order.auxPrice = float(new_stop_price)   # StopOrder trigger lives in auxPrice
+        order.transmit = True                     # modify-in-place, same orderId
+        self.ib.placeOrder(contract, order)
+        return str(order.orderId)
+
+    def working_orders(self, instrument):
+        out = []
+        for t in self.ib.openTrades():
+            if t.contract.symbol != instrument:
+                continue
+            o = t.order; rec = self._orders.get(str(o.orderId), {})
+            price = getattr(o, "auxPrice", 0.0) or getattr(o, "lmtPrice", 0.0)
+            out.append(WorkingOrder(id=str(o.orderId), instrument=instrument,
+                                    kind=rec.get("kind", OrderKind.ENTRY),
+                                    side=rec.get("side", ""),
+                                    price=float(price or 0.0),
+                                    qty=float(o.totalQuantity)))
+        return out
+
     def cancel_all(self, instrument):
         for t in self.ib.openTrades():
             if t.contract.symbol == instrument: self.ib.cancelOrder(t.order)

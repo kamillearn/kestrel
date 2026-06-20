@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import requests
 import logging
-from kestrel.execution.broker import Broker, OcoBracket, Position
+from kestrel.execution.broker import Broker, OcoBracket, Position, BracketHandle
 
 class OandaBroker(Broker):
     def __init__(self, token=None, account_id=None, env=None):
@@ -53,8 +53,21 @@ class OandaBroker(Broker):
         return df.set_index("time")
 
     def place_oco(self, b: OcoBracket):
-        # Implementation placeholder
-        pass
+        # NOT IMPLEMENTED: live OANDA execution is still a stub. Returns an empty
+        # handle (not None) so the new BracketHandle contract holds and dry-runs
+        # don't crash. v20 has no native OCA — a real impl needs software-OCO.
+        return BracketHandle(instrument=b.instrument)
+
+    # ---- adaptive-management stubs (see IBKR for the real implementations) ----
+
+    def cancel_order(self, instrument, order_id):
+        raise NotImplementedError("OANDA cancel_order not implemented yet")
+
+    def modify_stop(self, instrument, stop_order_id, new_stop_price):
+        raise NotImplementedError("OANDA modify_stop not implemented yet")
+
+    def working_orders(self, instrument):
+        raise NotImplementedError("OANDA working_orders not implemented yet")
 
     def open_orders(self, instrument):
         url = f"{self.host}/v3/accounts/{self.account}/pendingOrders"
