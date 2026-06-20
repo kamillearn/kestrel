@@ -3,9 +3,6 @@
 __pycache__/
 *.pyc
 .env
-config/
-config/ibkr.yaml
-config/oanda.yaml
 state.json
 journal.csv
 backtest_out/
@@ -14,3 +11,4 @@ engine/
 data_ibkr/
 data_oanda/
 .csv
+config/
