@@ -4,7 +4,8 @@ from __future__ import annotations
 import os
 import requests
 import logging
-from kestrel.execution.broker import Broker, OcoBracket, Position, BracketHandle
+from kestrel.execution.broker import (Broker, OcoBracket, Position, BracketHandle,
+                                      WorkingOrder, OrderKind)
 
 class OandaBroker(Broker):
     def __init__(self, token=None, account_id=None, env=None):
@@ -18,6 +19,21 @@ class OandaBroker(Broker):
 
         self.host = "https://api-fxpractice.oanda.com" if self.env == "practice" else "https://api-fxtrade.oanda.com"
         self.headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+        self._prec = {}   # instrument -> displayPrecision (cached)
+
+    def _precision(self, instrument):
+        """OANDA rejects prices finer than an instrument's displayPrecision."""
+        if instrument not in self._prec:
+            try:
+                r = requests.get(f"{self.host}/v3/accounts/{self.account}/instruments",
+                                 headers=self.headers, params={"instruments": instrument})
+                self._prec[instrument] = int(r.json()["instruments"][0]["displayPrecision"])
+            except Exception:
+                self._prec[instrument] = 5
+        return self._prec[instrument]
+
+    def _px(self, instrument, price):
+        return f"{float(price):.{self._precision(instrument)}f}"
 
     def connect(self):
         """Verify connection to OANDA by fetching account summary."""
@@ -53,24 +69,111 @@ class OandaBroker(Broker):
         return df.set_index("time")
 
     def place_oco(self, b: OcoBracket):
-        # NOT IMPLEMENTED: live OANDA execution is still a stub. Returns an empty
-        # handle (not None) so the new BracketHandle contract holds and dry-runs
-        # don't crash. v20 has no native OCA — a real impl needs software-OCO.
-        return BracketHandle(instrument=b.instrument)
+        """Two STOP entry orders (v20 has no native OCO). Each carries a
+        ``stopLossOnFill`` so the protective stop lives server-side the instant
+        the entry fills. Software-OCO (cancel the resting opposite) is done by
+        the runner's manage loop. Returns the entry order ids; the child stop ids
+        are created on fill and discovered later via ``working_orders``."""
+        handle = BracketHandle(instrument=b.instrument)
+        units = int(round(b.qty))
+        if units <= 0:
+            return handle
+        legs = [("long", b.long_entry, b.long_stop, units),
+                ("short", b.short_entry, b.short_stop, -units)]
+        for side, entry, stop, signed in legs:
+            if side not in b.allowed_sides:
+                continue   # trend filter narrowed this bracket to one side
+            order = {"order": {
+                "type": "STOP",
+                "instrument": b.instrument,
+                "units": str(signed),
+                "price": self._px(b.instrument, entry),
+                "timeInForce": "GTC",
+                "stopLossOnFill": {"price": self._px(b.instrument, stop), "timeInForce": "GTC"},
+                "clientExtensions": {"tag": b.tag, "comment": f"kestrel-{side}"},
+            }}
+            r = requests.post(f"{self.host}/v3/accounts/{self.account}/orders",
+                              headers=self.headers, json=order)
+            oid = r.json().get("orderCreateTransaction", {}).get("id")
+            if oid is None:
+                logging.error(f"OANDA place_oco {side} rejected: {r.text[:300]}")
+                continue
+            if side == "long":
+                handle.long_entry_id = str(oid)
+            else:
+                handle.short_entry_id = str(oid)
+        return handle
 
-    # ---- adaptive-management stubs (see IBKR for the real implementations) ----
+    # ---- adaptive-management (OANDA v20 REST) ----
 
     def cancel_order(self, instrument, order_id):
-        raise NotImplementedError("OANDA cancel_order not implemented yet")
+        """Cancel a single resting order (software-OCO / time-decay)."""
+        requests.put(f"{self.host}/v3/accounts/{self.account}/orders/{order_id}/cancel",
+                     headers=self.headers)
 
     def modify_stop(self, instrument, stop_order_id, new_stop_price):
-        raise NotImplementedError("OANDA modify_stop not implemented yet")
+        """Replace a STOP_LOSS order's price. OANDA's PUT /orders/{id} cancels the
+        old order and creates a new one (NEW id) bound to the same trade — return
+        that new id so the manager keeps tracking the live stop."""
+        existing = requests.get(f"{self.host}/v3/accounts/{self.account}/orders/{stop_order_id}",
+                                headers=self.headers).json().get("order", {})
+        body = {"order": {"type": "STOP_LOSS",
+                          "price": self._px(instrument, new_stop_price),
+                          "timeInForce": "GTC"}}
+        trade_id = existing.get("tradeID")
+        if trade_id:
+            body["order"]["tradeID"] = trade_id
+        r = requests.put(f"{self.host}/v3/accounts/{self.account}/orders/{stop_order_id}",
+                         headers=self.headers, json=body)
+        new_id = r.json().get("orderCreateTransaction", {}).get("id")
+        return str(new_id) if new_id else str(stop_order_id)
 
     def working_orders(self, instrument):
-        raise NotImplementedError("OANDA working_orders not implemented yet")
+        """Resting entry STOP orders (pendingOrders) plus the protective STOP_LOSS
+        attached to any open trade for this instrument."""
+        out = []
+        po = requests.get(f"{self.host}/v3/accounts/{self.account}/pendingOrders",
+                          headers=self.headers).json()
+        for o in po.get("orders", []):
+            if o.get("instrument") != instrument:
+                continue
+            if o.get("type") in ("STOP", "MARKET_IF_TOUCHED", "LIMIT"):
+                units = float(o.get("units", 0))
+                out.append(WorkingOrder(str(o["id"]), instrument, OrderKind.ENTRY,
+                                        "long" if units > 0 else "short",
+                                        float(o.get("price", 0) or 0), abs(units)))
+        ot = requests.get(f"{self.host}/v3/accounts/{self.account}/openTrades",
+                          headers=self.headers).json()
+        for t in ot.get("trades", []):
+            if t.get("instrument") != instrument:
+                continue
+            sl = t.get("stopLossOrder")
+            if sl:
+                cu = float(t.get("currentUnits", 0))
+                out.append(WorkingOrder(str(sl["id"]), instrument, OrderKind.STOP,
+                                        "long" if cu > 0 else "short",
+                                        float(sl.get("price", 0) or 0), abs(cu)))
+        return out
+
+    def last_price(self, instrument):
+        """Mid price snapshot for the +1R break-even check."""
+        try:
+            r = requests.get(f"{self.host}/v3/accounts/{self.account}/pricing",
+                             headers=self.headers, params={"instruments": instrument})
+            p = r.json()["prices"][0]
+            return (float(p["bids"][0]["price"]) + float(p["asks"][0]["price"])) / 2.0
+        except Exception:
+            bars = self.recent_bars(instrument, count=2)
+            return float(bars["close"].iloc[-1]) if len(bars) else float("nan")
 
     def recent_daily_closes(self, instrument, n):
-        raise NotImplementedError("OANDA recent_daily_closes not implemented yet")
+        """Completed daily mid closes (oldest first) for the trend filter."""
+        import pandas as pd
+        r = requests.get(f"{self.host}/v3/instruments/{instrument}/candles",
+                         headers=self.headers,
+                         params={"granularity": "D", "count": n + 5, "price": "M"})
+        closes = [float(c["mid"]["c"]) for c in r.json().get("candles", []) if c["complete"]]
+        return pd.Series(closes)
 
     def open_orders(self, instrument):
         url = f"{self.host}/v3/accounts/{self.account}/pendingOrders"

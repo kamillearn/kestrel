@@ -14,19 +14,23 @@ PHASE C (manage) bridges placement and flatten with adaptive behaviour:
 """
 import logging
 import argparse
+import json
 import yaml
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict, fields
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 import math
 
 from kestrel.execution.ibkr import IBKRBroker
 from kestrel.execution.oanda import OandaBroker
-from kestrel.execution.broker import OcoBracket, BracketHandle
+from kestrel.execution.broker import OcoBracket, BracketHandle, OrderKind
 from kestrel.instruments import SPECS
 from kestrel.strategy.filters import trend_allowed_side
 from kestrel.utils.sessions import ET
+
+STATE_PATH = "logs/kestrel_state.json"
 
 
 def et_minute(hhmm) -> int:
@@ -66,6 +70,54 @@ class InstrRuntime:
     be_moved: bool = False                    # break-even idempotency
     decay_cancelled: bool = False             # time-decay idempotency
     last_managed_ts: float = 0.0              # wall-clock throttle for the manage poll
+
+
+# ---------------------------------------------------------------------------
+# Durable state — survive a VPS restart without losing track of resting orders
+# or open trades. The whole daily_state is serialized to logs/kestrel_state.json
+# and only reloaded if the date inside matches today.
+# ---------------------------------------------------------------------------
+
+def _from_dict(cls, d):
+    """Build a dataclass from a dict, ignoring unknown keys (forward-compatible)."""
+    valid = {f.name for f in fields(cls)}
+    return cls(**{k: v for k, v in d.items() if k in valid})
+
+
+def _instr_from_dict(d):
+    d = dict(d)
+    h = d.pop("handle", None)
+    st = _from_dict(InstrRuntime, d)
+    st.handle = _from_dict(BracketHandle, h) if h else None
+    return st
+
+
+def save_state(daily_state, date_str, path=STATE_PATH):
+    """Atomically persist the full daily_state after a major transition."""
+    payload = {"date": date_str,
+               "instruments": {k: asdict(v) for k, v in daily_state.items()}}
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, default=str))
+    tmp.replace(p)   # atomic swap — a crash mid-write never corrupts the live file
+
+
+def load_state(today_str, instruments, path=STATE_PATH):
+    """Reload daily_state ONLY if the file's date matches today; else None."""
+    p = Path(path)
+    if not p.exists():
+        return None
+    try:
+        raw = json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        logging.warning(f"State file {path} unreadable ({e}); starting fresh.")
+        return None
+    if raw.get("date") != today_str:
+        return None
+    saved = raw.get("instruments", {})
+    return {inst: (_instr_from_dict(saved[inst]) if saved.get(inst) else InstrRuntime())
+            for inst in instruments}
 
 
 def make_broker(cfg):
@@ -111,6 +163,16 @@ def manage(broker, inst, st: InstrRuntime, spec, now_m, decay_cancel_m, breakeve
             st.entry_price, stop = st.short_entry, st.short_stop
         st.risk_per_unit = abs(st.entry_price - stop)
         st.stop_order_id = st.handle.stop_id_for(st.side) if st.handle else None
+        # OANDA creates the protective stop server-side on fill, so the handle
+        # carries no stop id at placement — discover the trade's child stop now.
+        if st.stop_order_id is None:
+            try:
+                stops = [w for w in broker.working_orders(inst)
+                         if w.kind == OrderKind.STOP and w.side in (st.side, "")]
+                if stops:
+                    st.stop_order_id = stops[0].id
+            except NotImplementedError:
+                pass
         # cancel the resting opposite entry: a no-op under IBKR's native OCA,
         # but REQUIRED on venues without one (e.g. OANDA).
         opp = st.handle.entry_id_for("short" if st.side == "long" else "long") if st.handle else None
@@ -198,8 +260,13 @@ def main():
             # 2. DAILY STATE RESET (If a new day has started)
             if current_date != today:
                 current_date = today
-                daily_state = {inst: InstrRuntime() for inst in instruments_to_watch}
-                logging.info(f"🌅 New Trading Session Started: {current_date}")
+                resumed = load_state(today.isoformat(), instruments_to_watch)
+                if resumed is not None:
+                    daily_state = resumed
+                    logging.info(f"♻️  Resumed durable state from {STATE_PATH} for {current_date}.")
+                else:
+                    daily_state = {inst: InstrRuntime() for inst in instruments_to_watch}
+                    logging.info(f"🌅 New Trading Session Started: {current_date}")
 
             # 3. ITERATE THROUGH PORTFOLIO
             for inst in instruments_to_watch:
@@ -229,6 +296,7 @@ def main():
                     else:
                         logging.info(f"[{inst}] DRY RUN: Would cancel_all + flatten.")
                     st.status = Status.FLAT
+                    save_state(daily_state, today.isoformat())
                     continue
 
                 # PHASE B: OPENING RANGE BREAKOUT (ORB) CALCULATION & EXECUTION
@@ -319,6 +387,7 @@ def main():
                     st.short_stop = bracket.short_stop
                     st.placed_at = now_et.isoformat()
                     st.status = Status.PLACED
+                    save_state(daily_state, today.isoformat())
                     logging.info(f"[{inst}] 🚀 OCO Bracket Deployed to Broker! (handle: {st.handle})")
                     continue  # manage from the next tick
 
@@ -326,7 +395,11 @@ def main():
                 if st.status in (Status.PLACED, Status.IN_TRADE) and args.live:
                     if time.time() - st.last_managed_ts >= manage_poll_s:
                         st.last_managed_ts = time.time()
+                        before = (st.status, st.be_moved)
                         manage(broker, inst, st, spec, now_m, decay_cancel_m, breakeven_R)
+                        if (st.status, st.be_moved) != before:
+                            # persist IN_TRADE / EXPIRED / FLATTENED / be_moved transitions
+                            save_state(daily_state, today.isoformat())
 
             loop_count += 1
             time.sleep(1)
