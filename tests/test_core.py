@@ -83,3 +83,21 @@ def test_durable_state_roundtrip(tmp_path):
     assert back["MNQ"].status == Status.IN_TRADE and back["MNQ"].be_moved
     assert back["MNQ"].handle.stop_id_for("long") == "SL1"   # nested dataclass survived
     assert load_state("2026-06-22", ["MNQ"], path=p) is None  # date mismatch -> fresh
+
+
+def test_durable_risk_counters(tmp_path):
+    p = str(tmp_path / "logs" / "state.json")
+    rm = RiskManager(RiskConfig(), equity=10000)
+    rm.on_open(); rm.on_open(); rm.on_close(-100.0)   # trades=2, open=1, realized=-100, streak=1
+    save_state({}, "2026-06-21", rm, path=p)
+
+    rm2 = RiskManager(RiskConfig(), equity=10000)      # simulates a fresh boot after a crash
+    rm2.roll_day(datetime.date(2026, 6, 21))
+    assert rm2.s.trades_today == 0                      # zeroed before reload
+    load_state("2026-06-21", [], rm2, path=p)           # same-day restart -> rehydrate
+    assert (rm2.s.trades_today, rm2.s.open_positions) == (2, 1)
+    assert rm2.s.realized_today == -100.0 and rm2.s.consec_losses == 1
+
+    rm3 = RiskManager(RiskConfig(), equity=10000)
+    load_state("2026-06-22", [], rm3, path=p)           # different day -> no rehydrate
+    assert rm3.s.trades_today == 0

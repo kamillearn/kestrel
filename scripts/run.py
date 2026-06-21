@@ -109,10 +109,12 @@ def _instr_from_dict(d):
     return st
 
 
-def save_state(daily_state, date_str, path=STATE_PATH):
-    """Atomically persist the full daily_state after a major transition."""
+def save_state(daily_state, date_str, risk=None, path=STATE_PATH):
+    """Atomically persist daily_state (and the risk counters) after a transition."""
     payload = {"date": date_str,
                "instruments": {k: asdict(v) for k, v in daily_state.items()}}
+    if risk is not None:
+        payload["risk"] = asdict(risk.s)
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".tmp")
@@ -120,8 +122,9 @@ def save_state(daily_state, date_str, path=STATE_PATH):
     tmp.replace(p)   # atomic swap — a crash mid-write never corrupts the live file
 
 
-def load_state(today_str, instruments, path=STATE_PATH):
-    """Reload daily_state ONLY if the file's date matches today; else None."""
+def load_state(today_str, instruments, risk=None, path=STATE_PATH):
+    """Reload daily_state — and rehydrate same-day risk counters — ONLY if the
+    file's date matches today; else None (fresh day)."""
     p = Path(path)
     if not p.exists():
         return None
@@ -132,6 +135,13 @@ def load_state(today_str, instruments, path=STATE_PATH):
         return None
     if raw.get("date") != today_str:
         return None
+    # Restore the risk COUNTERS on a same-day restart so daily-loss / max-trades /
+    # loss-streak breakers keep their memory. Equity stays the live broker value.
+    if risk is not None:
+        rs = raw.get("risk", {})
+        for f in ("realized_today", "trades_today", "open_positions", "consec_losses"):
+            if f in rs:
+                setattr(risk.s, f, rs[f])
     saved = raw.get("instruments", {})
     return {inst: (_instr_from_dict(saved[inst]) if saved.get(inst) else InstrRuntime())
             for inst in instruments}
@@ -300,6 +310,7 @@ def main():
 
     current_date = None
     daily_state = {}
+    gate_logged_m = {}   # inst -> last ET-minute a risk-gate warning was logged (throttle)
 
     logging.info("🧠 Kestrel Engine wired. Entering continuous execution loop.")
     loop_count = 0
@@ -315,7 +326,7 @@ def main():
             if current_date != today:
                 current_date = today
                 risk.roll_day(today)
-                resumed = load_state(today.isoformat(), instruments_to_watch)
+                resumed = load_state(today.isoformat(), instruments_to_watch, risk)
                 if resumed is not None:
                     daily_state = resumed
                     logging.info(f"♻️  Resumed durable state from {STATE_PATH} for {current_date}.")
@@ -347,16 +358,17 @@ def main():
                 if now_m >= flatten_m and st.status != Status.FLAT:
                     logging.info(f"[{inst}] 🔔 End of Session reached. Flattening all positions and orders.")
                     if args.live:
-                        exit_px = broker.last_price(sym) if st.side else float("nan")
                         broker.cancel_all(sym)
                         broker.flatten(sym)
-                        risk.on_close(_est_pnl(st, spec, exit_px))  # balances on_open; 0 if no fill
+                        if st.status != Status.WAITING:   # only placed brackets had an on_open
+                            exit_px = broker.last_price(sym) if st.side else float("nan")
+                            risk.on_close(_est_pnl(st, spec, exit_px))
                         if st.side:
                             journal.record_day(today, inst, st.side, broker.equity())
                     else:
                         logging.info(f"[{inst}] DRY RUN: Would cancel_all + flatten.")
                     st.status = Status.FLAT
-                    save_state(daily_state, today.isoformat())
+                    save_state(daily_state, today.isoformat(), risk)
                     continue
 
                 # PHASE B: OPENING RANGE BREAKOUT (ORB) CALCULATION & EXECUTION
@@ -369,7 +381,9 @@ def main():
                     # Circuit breakers + kill-switch gate every live placement
                     ok, why = risk.can_trade()
                     if not ok:
-                        logging.warning(f"[{inst}] ⛔ Placement gated by risk manager: {why}.")
+                        if gate_logged_m.get(inst) != now_m:   # at most once per minute
+                            logging.warning(f"[{inst}] ⛔ Placement gated by risk manager: {why}.")
+                            gate_logged_m[inst] = now_m
                         continue   # re-evaluated next tick (kill removed / limits roll over)
 
                     logging.info(f"[{inst}] ⏳ Opening Range ({or_mins}m) completed. Calculating edge...")
@@ -451,7 +465,7 @@ def main():
                     st.placed_at = now_et.isoformat()
                     st.status = Status.PLACED
                     risk.on_open()
-                    save_state(daily_state, today.isoformat())
+                    save_state(daily_state, today.isoformat(), risk)
                     logging.info(f"[{inst}] 🚀 OCO Bracket Deployed to Broker! (handle: {st.handle})")
                     continue  # manage from the next tick
 
@@ -464,7 +478,7 @@ def main():
                                risk, journal)
                         if (st.status, st.be_moved) != before:
                             # persist IN_TRADE / EXPIRED / FLATTENED / be_moved transitions
-                            save_state(daily_state, today.isoformat())
+                            save_state(daily_state, today.isoformat(), risk)
 
             loop_count += 1
             time.sleep(1)
