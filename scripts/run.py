@@ -227,6 +227,9 @@ def main():
         datefmt="%Y-%m-%d %H:%M:%S"
     )
 
+    # Silence verbose IBKR info-level logs
+    logging.getLogger('ib_insync').setLevel(logging.WARNING)
+
     logging.info(f"Loading config from: {args.config_path}")
     with open(args.config_path, 'r') as f:
         cfg = yaml.safe_load(f)
