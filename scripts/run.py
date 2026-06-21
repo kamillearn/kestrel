@@ -25,6 +25,7 @@ from kestrel.execution.ibkr import IBKRBroker
 from kestrel.execution.oanda import OandaBroker
 from kestrel.execution.broker import OcoBracket, BracketHandle
 from kestrel.instruments import SPECS
+from kestrel.strategy.filters import trend_allowed_side
 from kestrel.utils.sessions import ET
 
 
@@ -275,6 +276,24 @@ def main():
                     logging.info(f"[{inst}] OR High: {or_high:.2f} | OR Low: {or_low:.2f} | Width: {or_width:.2f}")
                     logging.info(f"[{inst}] Sizing: {qty} contracts (Risk: ${risk_dollars:.2f})")
 
+                    # Daily-trend filter: if enabled, only place the side that agrees
+                    # with the prior close vs an N-day SMA (skip counter-trend breakouts).
+                    # Fail-safe: any problem falls back to the full two-sided OCO.
+                    allowed_sides = ("long", "short")
+                    if strat_cfg.get("trend_filter", False):
+                        n = int(strat_cfg.get("trend_sma", 20))
+                        try:
+                            closes = broker.recent_daily_closes(inst, n)
+                            side = trend_allowed_side(closes, n)
+                            if side is None:
+                                logging.warning(f"[{inst}] trend filter: <{n} daily closes available; placing two-sided.")
+                            else:
+                                allowed_sides = (side,)
+                                logging.info(f"[{inst}] 🧭 Trend filter: {side.upper()}-only (prior close vs SMA{n}).")
+                        except NotImplementedError:
+                            logging.warning(f"[{inst}] trend filter enabled but {type(broker).__name__} "
+                                            f"has no daily closes; placing two-sided.")
+
                     # Construct the Institutional OCO Bracket
                     tag = f"ORB{or_mins}-{today.strftime('%m%d')}"
                     bracket = OcoBracket(
@@ -286,7 +305,8 @@ def main():
                         short_entry=or_low - spec.slippage,
                         short_stop=or_high + spec.slippage,
                         short_target=None,
-                        tag=tag
+                        tag=tag,
+                        allowed_sides=allowed_sides,
                     )
 
                     # Send to Broker and record everything PHASE C will need

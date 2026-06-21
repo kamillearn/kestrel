@@ -23,6 +23,9 @@ class OcoBracket:
     long_target: Optional[float] = None
     short_target: Optional[float] = None
     tag: str = "daybreak"
+    # Sides the adapter should actually place. The trend filter narrows this to
+    # one side ("long",) or ("short",); default places the full two-sided OCO.
+    allowed_sides: tuple = ("long", "short")
 
 
 @dataclass
@@ -135,3 +138,9 @@ class Broker(ABC):
         ``recent_bars``; adapters may override with a live quote/tick."""
         df = self.recent_bars(instrument, count=2)
         return float(df["close"].iloc[-1]) if len(df) else float("nan")
+
+    def recent_daily_closes(self, instrument: str, n: int):
+        """Last ~n completed daily closes (oldest first) for the trend filter.
+        Adapters must override with a real daily-bar request — minute bars don't
+        reach far enough back."""
+        raise NotImplementedError

@@ -69,6 +69,9 @@ class OandaBroker(Broker):
     def working_orders(self, instrument):
         raise NotImplementedError("OANDA working_orders not implemented yet")
 
+    def recent_daily_closes(self, instrument, n):
+        raise NotImplementedError("OANDA recent_daily_closes not implemented yet")
+
     def open_orders(self, instrument):
         url = f"{self.host}/v3/accounts/{self.account}/pendingOrders"
         r = requests.get(url, headers=self.headers)

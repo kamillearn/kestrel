@@ -14,14 +14,18 @@ import numpy as np
 import pandas as pd
 
 from kestrel.instruments import InstrumentSpec
+from kestrel.strategy.filters import trend_allowed_map
 from kestrel.strategy.orb import ORBStrategy
 
 
 def backtest(df: pd.DataFrame, spec: InstrumentSpec, target_R=None,
-             slippage: float | None = None) -> pd.DataFrame:
+             slippage: float | None = None, trend_sma: int | None = None) -> pd.DataFrame:
     s = spec.session
     slip = spec.slippage if slippage is None else slippage
     strat = ORBStrategy(spec, target_R=target_R)
+    # Optional daily-trend filter: veto breakouts that disagree with the prior
+    # close vs an N-day SMA (and the early days that lack enough history).
+    allowed = trend_allowed_map(df, s, trend_sma) if trend_sma else None
     rth = df[(df["et_min"] >= s.open_m) & (df["et_min"] < s.close_m)]
     rows = []
     for day, g in rth.groupby("etdate"):
@@ -43,6 +47,9 @@ def backtest(df: pd.DataFrame, spec: InstrumentSpec, target_R=None,
             continue
         side = "long" if iu < idn else ("short" if idn < iu else
                                         ("long" if cl[iu] >= op[iu] else "short"))
+        # trend filter: skip counter-trend breakouts (and pre-history days)
+        if allowed is not None and allowed.get(day) != side:
+            continue
         ei = min(iu, idn)
         risk = plan.risk
         if side == "long":

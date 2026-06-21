@@ -52,6 +52,14 @@ class IBKRBroker(Broker):
                           columns=["time","open","high","low","close","volume"])
         df["time"] = pd.to_datetime(df["time"], utc=True); return df.set_index("time")
 
+    def recent_daily_closes(self, instrument, n):
+        """Completed daily RTH closes (oldest first) for the trend filter."""
+        c = self._contract(instrument)
+        bars = self.ib.reqHistoricalData(c, "", f"{n + 5} D", "1 day",
+                                         "TRADES", useRTH=True, formatDate=2)
+        closes = [float(bar.close) for bar in bars]
+        return pd.Series(closes)
+
     def place_oco(self, b: OcoBracket):
         from ib_insync import StopOrder, LimitOrder
         c = self._contract(b.instrument); q = int(round(b.qty))
@@ -61,6 +69,8 @@ class IBKRBroker(Broker):
         for side, action, entry, stop, tgt in [
                 ("long", "BUY", b.long_entry, b.long_stop, b.long_target),
                 ("short", "SELL", b.short_entry, b.short_stop, b.short_target)]:
+            if side not in b.allowed_sides:
+                continue   # trend filter narrowed this bracket to one side
             # parent stop-entry, joined to the OCA group (first to fill cancels the other)
             parent = StopOrder(action, q, entry)
             parent.ocaGroup = oca; parent.ocaType = 1; parent.transmit = False
