@@ -1,6 +1,5 @@
 """
-Kestrel Engine - Live Production Entry Point.
-This script loads the configuration and initializes the broker/strategy.
+Kestrel Engine - Live Production Entry Point (the single, canonical runner).
 
 The daily lifecycle per instrument is a 5-state machine:
 
@@ -11,6 +10,10 @@ PHASE C (manage) bridges placement and flatten with adaptive behaviour:
   1) fill detection + software-OCO (cancel the resting opposite entry),
   2) time-decay cancellation of un-triggered brackets past a cutoff (default 11:30 ET),
   3) break-even auto-trail: move the stop to entry once the trade is +1R.
+
+Safety: durable state (crash-safe), a RiskManager guarding every placement
+(daily-loss / max-trades / max-concurrent / loss-streak circuit breakers + a
+`touch KILL` kill-switch file), and dry-run by default (add --live to send orders).
 """
 import logging
 import argparse
@@ -27,6 +30,8 @@ from kestrel.execution.ibkr import IBKRBroker
 from kestrel.execution.oanda import OandaBroker
 from kestrel.execution.broker import OcoBracket, BracketHandle, OrderKind
 from kestrel.instruments import SPECS
+from kestrel.reporting.journal import Journal
+from kestrel.risk.manager import RiskManager, RiskConfig
 from kestrel.strategy.filters import trend_allowed_side
 from kestrel.utils.sessions import ET
 
@@ -37,6 +42,17 @@ def et_minute(hhmm) -> int:
     """'11:30' -> 690 (minutes past ET midnight)."""
     h, m = str(hhmm).split(":")
     return int(h) * 60 + int(m)
+
+
+def broker_symbol(broker, inst):
+    """Map a SPEC key (e.g. 'MNQ') to the identifier THIS broker's API expects.
+    IBKR trades the futures symbol; OANDA trades the CFD symbol (e.g. NAS100_USD).
+    Keeping the SPEC key for state/specs while sending the broker its own symbol is
+    what lets the same engine drive both venues."""
+    spec = SPECS[inst]
+    if isinstance(broker, OandaBroker):
+        return spec.oanda_symbol or inst
+    return spec.ibkr_symbol or inst
 
 
 class Status:
@@ -50,11 +66,12 @@ class Status:
 
 @dataclass
 class InstrRuntime:
-    """Per-instrument daily state. Serializable so it can later be persisted to a
-    durable StateStore for crash-safety (currently in-memory)."""
+    """Per-instrument daily state. Serialized to logs/kestrel_state.json after
+    every major transition so a restart never loses resting orders or open trades."""
     status: str = Status.WAITING
     # placement
     handle: Optional[BracketHandle] = None   # carries entry + stop order ids
+    qty: float = 0.0
     or_high: float = 0.0
     or_low: float = 0.0
     long_entry: float = 0.0
@@ -140,6 +157,20 @@ def make_broker(cfg):
         raise ValueError(f"Unknown broker requested in config: '{broker_name}'")
 
 
+def make_risk(cfg, equity, n_instruments):
+    """Build the RiskManager (circuit breakers + kill-switch) from config, with
+    portfolio-aware defaults so a multi-instrument book isn't throttled by accident."""
+    rc = cfg.get("risk", {})
+    return RiskManager(RiskConfig(
+        risk_per_trade=rc.get("risk_per_trade", 0.005),
+        max_daily_loss=rc.get("max_daily_loss", 0.02),
+        max_trades_per_day=rc.get("max_trades_per_day", max(3, n_instruments)),
+        max_concurrent=rc.get("max_concurrent", max(2, n_instruments)),
+        max_consecutive_losses=rc.get("max_consecutive_losses", 6),
+        kill_switch_file=rc.get("kill_switch_file", "KILL"),
+    ), equity)
+
+
 def get_strategy_config(cfg, instrument_key):
     """Extracts specific strategy overrides for an instrument from the config."""
     assets = cfg.get("strategy", {}).get("assets", [])
@@ -149,9 +180,21 @@ def get_strategy_config(cfg, instrument_key):
     return {}
 
 
-def manage(broker, inst, st: InstrRuntime, spec, now_m, decay_cancel_m, breakeven_R):
+def _est_pnl(st: "InstrRuntime", spec, exit_px) -> float:
+    """Best-effort realized PnL for the risk breakers. The exit is proxied by the
+    last price (the known live-accounting gap), so the SIGN is reliable but the
+    magnitude is approximate; returns 0 when no fill ever happened."""
+    if st.side is None or st.qty <= 0 or exit_px != exit_px:   # no fill / NaN
+        return 0.0
+    pts = (exit_px - st.entry_price) if st.side == "long" else (st.entry_price - exit_px)
+    return pts * spec.point_value * st.qty
+
+
+def manage(broker, inst, st: InstrRuntime, spec, now_m, decay_cancel_m, breakeven_R,
+           risk, journal):
     """PHASE C — the adaptive bridge between placement and flatten. Live only."""
-    pos = [p for p in broker.positions() if p.instrument == inst]
+    sym = broker_symbol(broker, inst)
+    pos = [p for p in broker.positions() if p.instrument == sym]
 
     # 1) FILL DETECTION  (PLACED -> IN_TRADE)  + software-OCO
     if st.status == Status.PLACED and pos:
@@ -167,7 +210,7 @@ def manage(broker, inst, st: InstrRuntime, spec, now_m, decay_cancel_m, breakeve
         # carries no stop id at placement — discover the trade's child stop now.
         if st.stop_order_id is None:
             try:
-                stops = [w for w in broker.working_orders(inst)
+                stops = [w for w in broker.working_orders(sym)
                          if w.kind == OrderKind.STOP and w.side in (st.side, "")]
                 if stops:
                     st.stop_order_id = stops[0].id
@@ -177,7 +220,7 @@ def manage(broker, inst, st: InstrRuntime, spec, now_m, decay_cancel_m, breakeve
         # but REQUIRED on venues without one (e.g. OANDA).
         opp = st.handle.entry_id_for("short" if st.side == "long" else "long") if st.handle else None
         if opp:
-            broker.cancel_order(inst, opp)
+            broker.cancel_order(sym, opp)
         logging.info(f"[{inst}] ✅ Filled {st.side.upper()} @~{st.entry_price:.2f} "
                      f"(1R={st.risk_per_unit:.2f}). Opposite cancelled — now IN_TRADE.")
         return
@@ -185,7 +228,7 @@ def manage(broker, inst, st: InstrRuntime, spec, now_m, decay_cancel_m, breakeve
     # 2) TIME-DECAY CANCEL  (still PLACED, no fill, past the cutoff)  -> EXPIRED
     if st.status == Status.PLACED and not pos and now_m >= decay_cancel_m and not st.decay_cancelled:
         for oid in (st.handle.entry_ids if st.handle else []):
-            broker.cancel_order(inst, oid)     # entries only; nothing else is live
+            broker.cancel_order(sym, oid)      # entries only; nothing else is live
         st.decay_cancelled = True
         st.status = Status.EXPIRED
         logging.info(f"[{inst}] ⌛ No breakout by {decay_cancel_m // 60:02d}:{decay_cancel_m % 60:02d} ET. "
@@ -195,12 +238,14 @@ def manage(broker, inst, st: InstrRuntime, spec, now_m, decay_cancel_m, breakeve
     # position closed while we were IN_TRADE (stop hit / target / manual) -> done
     if st.status == Status.IN_TRADE and not pos:
         st.status = Status.FLAT
+        risk.on_close(_est_pnl(st, spec, broker.last_price(sym)))
+        journal.record_day(datetime.now(ET).date(), inst, st.side, broker.equity())
         logging.info(f"[{inst}] Position closed (stop/target). Done for the day.")
         return
 
     # 3) BREAK-EVEN TRAIL  (IN_TRADE, hit +1R, not yet moved)
     if st.status == Status.IN_TRADE and not st.be_moved and st.stop_order_id:
-        px = broker.last_price(inst)
+        px = broker.last_price(sym)
         if px != px:                            # NaN guard (no price yet)
             return
         if st.side == "long":
@@ -209,7 +254,7 @@ def manage(broker, inst, st: InstrRuntime, spec, now_m, decay_cancel_m, breakeve
             hit = px <= st.entry_price - breakeven_R * st.risk_per_unit
         if hit:
             # move the stop to entry — modify-in-place, no unprotected window
-            st.stop_order_id = broker.modify_stop(inst, st.stop_order_id, st.entry_price)
+            st.stop_order_id = broker.modify_stop(sym, st.stop_order_id, st.entry_price)
             st.be_moved = True
             logging.info(f"[{inst}] 🛡️ +{breakeven_R:g}R reached (px={px:.2f}). "
                          f"Stop trailed to break-even @ {st.entry_price:.2f}.")
@@ -226,9 +271,7 @@ def main():
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
-
-    # Silence verbose IBKR info-level logs
-    logging.getLogger('ib_insync').setLevel(logging.WARNING)
+    logging.getLogger('ib_insync').setLevel(logging.WARNING)  # silence verbose IBKR logs
 
     logging.info(f"Loading config from: {args.config_path}")
     with open(args.config_path, 'r') as f:
@@ -243,14 +286,22 @@ def main():
     instruments_to_watch = cfg.get("instruments", [])
     logging.info(f"Loaded Portfolio: {instruments_to_watch}")
 
+    risk = make_risk(cfg, starting_equity, len(instruments_to_watch))
+    journal_path = cfg.get("engine", {}).get("journal_path", "logs/journal.csv")
+    Path(journal_path).parent.mkdir(parents=True, exist_ok=True)  # Journal writes on init
+    journal = Journal(journal_path)
+    logging.info(f"Risk guards armed: kill-switch='{risk.cfg.kill_switch_file}', "
+                 f"max_trades/day={risk.cfg.max_trades_per_day}, "
+                 f"max_concurrent={risk.cfg.max_concurrent}, "
+                 f"daily_loss={risk.cfg.max_daily_loss:.1%}")
+
     # How often PHASE C polls the broker (REST-friendly for OANDA; IBKR is a socket).
     manage_poll_s = cfg.get("engine", {}).get("manage_poll_seconds", 10)
 
-    # Internal Engine State tracker
     current_date = None
     daily_state = {}
 
-    logging.info("🧠 Kestrel Engine Brain Wired. Entering continuous execution loop.")
+    logging.info("🧠 Kestrel Engine wired. Entering continuous execution loop.")
     loop_count = 0
 
     try:
@@ -263,6 +314,7 @@ def main():
             # 2. DAILY STATE RESET (If a new day has started)
             if current_date != today:
                 current_date = today
+                risk.roll_day(today)
                 resumed = load_state(today.isoformat(), instruments_to_watch)
                 if resumed is not None:
                     daily_state = resumed
@@ -278,12 +330,13 @@ def main():
                     continue  # Done for the day
 
                 spec = SPECS[inst]
+                sym = broker_symbol(broker, inst)
                 strat_cfg = get_strategy_config(cfg, inst)
 
                 # Use custom OR minutes from config if provided, else registry default
                 or_mins = strat_cfg.get("or_minutes", spec.session.or_minutes)
 
-                # Session times + new adaptive knobs
+                # Session times + adaptive knobs
                 open_m = spec.session.open_m
                 or_end_m = open_m + or_mins
                 flatten_m = spec.session.flatten_m
@@ -294,8 +347,12 @@ def main():
                 if now_m >= flatten_m and st.status != Status.FLAT:
                     logging.info(f"[{inst}] 🔔 End of Session reached. Flattening all positions and orders.")
                     if args.live:
-                        broker.cancel_all(inst)
-                        broker.flatten(inst)
+                        exit_px = broker.last_price(sym) if st.side else float("nan")
+                        broker.cancel_all(sym)
+                        broker.flatten(sym)
+                        risk.on_close(_est_pnl(st, spec, exit_px))  # balances on_open; 0 if no fill
+                        if st.side:
+                            journal.record_day(today, inst, st.side, broker.equity())
                     else:
                         logging.info(f"[{inst}] DRY RUN: Would cancel_all + flatten.")
                     st.status = Status.FLAT
@@ -309,12 +366,16 @@ def main():
                         st.status = Status.PLACED
                         continue
 
+                    # Circuit breakers + kill-switch gate every live placement
+                    ok, why = risk.can_trade()
+                    if not ok:
+                        logging.warning(f"[{inst}] ⛔ Placement gated by risk manager: {why}.")
+                        continue   # re-evaluated next tick (kill removed / limits roll over)
+
                     logging.info(f"[{inst}] ⏳ Opening Range ({or_mins}m) completed. Calculating edge...")
 
                     # Fetch recent bars to find the High/Low of the opening range
-                    # We fetch 60 minutes just to be safe, then slice the exact OR window
-                    bars = broker.recent_bars(inst, count=60)
-
+                    bars = broker.recent_bars(sym, count=60)
                     if bars.empty:
                         logging.error(f"[{inst}] Failed to fetch recent bars. Retrying next loop.")
                         continue
@@ -326,7 +387,6 @@ def main():
                         (bars["et_time"].dt.hour * 60 + bars["et_time"].dt.minute >= open_m) &
                         (bars["et_time"].dt.hour * 60 + bars["et_time"].dt.minute < or_end_m)
                     ]
-
                     if or_bars.empty:
                         logging.warning(f"[{inst}] No data found for the Opening Range period today.")
                         continue
@@ -334,7 +394,6 @@ def main():
                     or_high = float(or_bars["high"].max())
                     or_low = float(or_bars["low"].min())
                     or_width = or_high - or_low
-
                     if or_width <= 0:
                         continue  # Bad data protection
 
@@ -354,7 +413,7 @@ def main():
                     if strat_cfg.get("trend_filter", False):
                         n = int(strat_cfg.get("trend_sma", 20))
                         try:
-                            closes = broker.recent_daily_closes(inst, n)
+                            closes = broker.recent_daily_closes(sym, n)
                             side = trend_allowed_side(closes, n)
                             if side is None:
                                 logging.warning(f"[{inst}] trend filter: <{n} daily closes available; placing two-sided.")
@@ -365,10 +424,10 @@ def main():
                             logging.warning(f"[{inst}] trend filter enabled but {type(broker).__name__} "
                                             f"has no daily closes; placing two-sided.")
 
-                    # Construct the Institutional OCO Bracket
+                    # Construct the OCO bracket (use the broker's own symbol)
                     tag = f"ORB{or_mins}-{today.strftime('%m%d')}"
                     bracket = OcoBracket(
-                        instrument=inst,
+                        instrument=sym,
                         qty=qty,
                         long_entry=or_high + spec.slippage,
                         long_stop=or_low - spec.slippage,
@@ -382,6 +441,7 @@ def main():
 
                     # Send to Broker and record everything PHASE C will need
                     st.handle = broker.place_oco(bracket)
+                    st.qty = qty
                     st.or_high = or_high
                     st.or_low = or_low
                     st.long_entry = bracket.long_entry
@@ -390,6 +450,7 @@ def main():
                     st.short_stop = bracket.short_stop
                     st.placed_at = now_et.isoformat()
                     st.status = Status.PLACED
+                    risk.on_open()
                     save_state(daily_state, today.isoformat())
                     logging.info(f"[{inst}] 🚀 OCO Bracket Deployed to Broker! (handle: {st.handle})")
                     continue  # manage from the next tick
@@ -399,7 +460,8 @@ def main():
                     if time.time() - st.last_managed_ts >= manage_poll_s:
                         st.last_managed_ts = time.time()
                         before = (st.status, st.be_moved)
-                        manage(broker, inst, st, spec, now_m, decay_cancel_m, breakeven_R)
+                        manage(broker, inst, st, spec, now_m, decay_cancel_m, breakeven_R,
+                               risk, journal)
                         if (st.status, st.be_moved) != before:
                             # persist IN_TRADE / EXPIRED / FLATTENED / be_moved transitions
                             save_state(daily_state, today.isoformat())

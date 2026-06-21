@@ -142,13 +142,13 @@ state:                    PRODUCTION_READY
 
 ## 🏗️ System Architecture
 
-> Built for high-uptime, **venue-agnostic** execution with AI-powered oversight.
+> Built for high-uptime, **venue-agnostic** execution with hard risk controls.
 
 | Module | Pipeline | Responsibility |
 |:------:|:---------|:---------------|
-| 🧠 **Core Engine** | `execution/broker.py` · `instruments.py` | The execution heart — manages OCO handles, point values, and multi-broker routing (**IBKR / OANDA**). |
-| 📡 **Telemetry & AI Ops** | `mcp_server.py` · `heartbeat.py` | Real-time JSON state snapshots wired to a **Claude MCP Server** and Telegram alerts. |
-| 🏭 **Alpha Factory** | `alpha_factory.py` · `alpha_daemon.py` | Autonomous research pipeline — scans global markets for new edges and verifies **T-Stats**. |
+| 🧠 **Core Engine** | `scripts/run.py` · `execution/broker.py` · `execution/{ibkr,oanda}.py` | The 5-state live runner — places & manages the OCO bracket, routing venue-agnostically (**IBKR futures / OANDA CFDs**). |
+| 🛡️ **Risk & Safety** | `risk/manager.py` · `logs/kestrel_state.json` | Circuit breakers (daily-loss / max-trades / loss-streak), a `KILL` switch, and crash-safe durable state. |
+| 🔬 **Research & Edge** | `engine/backtester.py` · `strategy/filters.py` · `scripts/validate.py` | Backtest↔live parity, the validated daily-trend filter, and the walk-forward validation harness. |
 
 ---
 
@@ -156,10 +156,10 @@ state:                    PRODUCTION_READY
 
 |   | Safeguard | Control |
 |:-:|:----------|:--------|
-| ✅ | **Portfolio Killswitch** | Automatic closure of all orders if account drawdown hits **20% total**. |
-| ✅ | **Daily Risk Cap** | Hard daily cap of **1% portfolio risk** across all correlated assets. |
-| ✅ | **Time-Decay Exit** | Non-triggered orders are canceled; open trades are **squared before the close**. |
-| ✅ | **MCP Guardrails** | AI monitors live slippage and can **physically halt execution** via the flag system. |
+| ✅ | **Kill Switch** | `touch KILL` halts all new placements instantly — a file the engine checks before every order. |
+| ✅ | **Risk Circuit Breakers** | Trading halts on a daily-loss limit, max trades/day, max concurrent, or a consecutive-loss streak. |
+| ✅ | **Time-Decay Exit** | Un-triggered brackets are cancelled by **11:30 ET**; open trades are **squared before the close**. |
+| ✅ | **Crash-Safe State** | Durable JSON state survives a VPS restart mid-session — no double-placement, no lost trades. |
 
 ### Pre-Flight Validation
 

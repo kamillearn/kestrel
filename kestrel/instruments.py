@@ -62,17 +62,17 @@ SPECS: dict[str, InstrumentSpec] = {
     "ESTX50": InstrumentSpec("ESTX50", point_value=10.0, tick=1.0, slippage=1.0,
                              session=EU_EQUITY, ibkr_symbol="ESTX50", ibkr_exchange="EUREX"),
 
-    # Z (UK FTSE 100 Index): £10 per point, 0.5 tick size
+    # Z (UK FTSE 100 Index): £10 per point, 0.5 tick size — London session
     "Z":      InstrumentSpec("Z", point_value=10.0, tick=0.5, slippage=0.5,
-                             session=EU_EQUITY, ibkr_symbol="Z"),
+                             session=UK_EQUITY, ibkr_symbol="Z"),
 
-    # HSI (Hang Seng Index): HKD 50 per point, 1.0 tick size
+    # HSI (Hang Seng Index): HKD 50 per point, 1.0 tick size — Hong Kong session
     "HSI":    InstrumentSpec("HSI", point_value=50.0, tick=1.0, slippage=2.0,
-                             session=ASIA_EQUITY, ibkr_symbol="HSI"),
+                             session=HK_EQUITY, ibkr_symbol="HSI"),
 
-    # AP (ASX SPI 200): AUD 25 per point, 1.0 tick size
+    # AP (ASX SPI 200): AUD 25 per point, 1.0 tick size — Sydney session
     "AP":     InstrumentSpec("AP", point_value=25.0, tick=1.0, slippage=1.0,
-                             session=ASIA_EQUITY, ibkr_symbol="AP"),
+                             session=AU_EQUITY, ibkr_symbol="AP"),
 }
 
 def get_spec(key: str) -> InstrumentSpec:

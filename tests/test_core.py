@@ -1,14 +1,18 @@
 """Test suite. Run: PYTHONPATH=. pytest -q"""
+import datetime
 import numpy as np
 import pandas as pd
-from datetime import datetime
 
-from kestrel.utils.sessions import to_eastern, US_EQUITY, ET
+from kestrel.utils.sessions import to_eastern
 from kestrel.instruments import get_spec
 from kestrel.strategy.orb import ORBStrategy
 from kestrel.engine.backtester import backtest
 from kestrel.risk.manager import RiskManager, RiskConfig
-from kestrel.live.scheduler import phase, Phase
+from kestrel.execution.oanda import OandaBroker
+from kestrel.execution.ibkr import IBKRBroker
+from kestrel.execution.broker import BracketHandle
+
+from scripts.run import InstrRuntime, Status, save_state, load_state, broker_symbol
 
 
 def _rising_day(date="2024-06-03"):
@@ -34,6 +38,13 @@ def test_orb_plan_and_long_breakout():
     assert tr.iloc[0]["risk"] > 0
 
 
+def test_trend_filter_is_subset():
+    # the trend filter can only ever REMOVE trades, never add or flip them
+    df = to_eastern(_rising_day(), "time")
+    spec = get_spec("MNQ")
+    assert len(backtest(df, spec, trend_sma=20)) <= len(backtest(df, spec))
+
+
 def test_risk_sizing_and_kill_switch(tmp_path):
     ks = tmp_path / "KILL"
     rm = RiskManager(RiskConfig(risk_per_trade=0.01, kill_switch_file=str(ks)), equity=10000)
@@ -44,9 +55,31 @@ def test_risk_sizing_and_kill_switch(tmp_path):
     ok, why = rm.can_trade(); assert not ok and "kill" in why
 
 
-def test_phases():
-    s = US_EQUITY
-    assert phase(s, datetime(2024, 6, 3, 9, 0, tzinfo=ET)) == Phase.PRE_OPEN
-    assert phase(s, datetime(2024, 6, 3, 9, 45, tzinfo=ET)) == Phase.OPENING_RANGE
-    assert phase(s, datetime(2024, 6, 3, 12, 0, tzinfo=ET)) == Phase.ACTIVE
-    assert phase(s, datetime(2024, 6, 3, 15, 58, tzinfo=ET)) == Phase.FLATTEN
+def test_risk_circuit_breakers():
+    rm = RiskManager(RiskConfig(max_trades_per_day=2, max_concurrent=5), equity=10000)
+    rm.roll_day(datetime.date(2024, 6, 3))
+    assert rm.can_trade()[0]
+    rm.on_open(); rm.on_close(-50.0)        # trade 1 (a loss)
+    assert rm.can_trade()[0]
+    rm.on_open(); rm.on_close(10.0)         # trade 2
+    assert not rm.can_trade()[0]            # max_trades_per_day=2 reached
+
+
+def test_broker_symbol_mapping():
+    oanda = OandaBroker(account_id="acc", token="tok", env="practice")
+    ibkr = IBKRBroker()
+    assert broker_symbol(oanda, "MNQ") == "NAS100_USD"   # OANDA CFD symbol
+    assert broker_symbol(ibkr, "MNQ") == "MNQ"           # IBKR futures symbol
+
+
+def test_durable_state_roundtrip(tmp_path):
+    p = str(tmp_path / "logs" / "state.json")
+    ds = {"MNQ": InstrRuntime(status=Status.IN_TRADE,
+                              handle=BracketHandle("MNQ", long_stop_id="SL1"),
+                              side="long", be_moved=True, qty=2.0)}
+    save_state(ds, "2026-06-21", path=p)
+    back = load_state("2026-06-21", ["MNQ"], path=p)
+    assert back is not None
+    assert back["MNQ"].status == Status.IN_TRADE and back["MNQ"].be_moved
+    assert back["MNQ"].handle.stop_id_for("long") == "SL1"   # nested dataclass survived
+    assert load_state("2026-06-22", ["MNQ"], path=p) is None  # date mismatch -> fresh

@@ -20,7 +20,7 @@ from kestrel.instruments import get_spec
 
 def validate_one(key: str, path: str):
     spec = get_spec(key)
-    df = load_csv(path)
+    df = load_csv(path, target_tz=spec.session.timezone)  # align OR to the local cash open
     base = backtest(df, spec)
     print(f"\n========== {key} ==========")
     print("baseline:", summarize(base))

@@ -14,7 +14,10 @@ def main(argv):
     logs = {}; rows = []
     for a in argv:
         k, p = a.split("=", 1)
-        tr = backtest(load_csv(p), get_spec(k)); logs[k] = tr
+        spec = get_spec(k)
+        # Load each market in ITS OWN session timezone so the opening range aligns
+        # to the local cash open (US=NY, DAX=Berlin, FTSE=London, ...), not always NY.
+        tr = backtest(load_csv(p, target_tz=spec.session.timezone), spec); logs[k] = tr
         tr.to_csv(out / f"{k}.csv", index=False)
         rows.append({"asset": k, **summarize(tr)})
     print(pd.DataFrame(rows).to_string(index=False))
