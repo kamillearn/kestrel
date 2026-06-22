@@ -311,6 +311,11 @@ def main():
             today = now_et.date()
             now_m = now_et.hour * 60 + now_et.minute
 
+            # --- ADD THIS WEEKEND CHECK ---
+            if today.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
+                time.sleep(300)       # Sleep for 5 minutes at a time
+                continue
+
             # 2. DAILY STATE RESET (If a new day has started)
             if current_date != today:
                 current_date = today
@@ -388,7 +393,10 @@ def main():
                         (bars["et_time"].dt.hour * 60 + bars["et_time"].dt.minute < or_end_m)
                     ]
                     if or_bars.empty:
-                        logging.warning(f"[{inst}] No data found for the Opening Range period today.")
+                        # Throttle the warning so it only prints once per minute instead of once per second
+                        if gate_logged_m.get(f"{inst}_nodata") != now_m:
+                            logging.warning(f"[{inst}] No data found for the Opening Range period today (Market Holiday?).")
+                            gate_logged_m[f"{inst}_nodata"] = now_m
                         continue
 
                     or_high = float(or_bars["high"].max())

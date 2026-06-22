@@ -78,30 +78,82 @@ class OandaBroker(Broker):
         units = int(round(b.qty))
         if units <= 0:
             return handle
+
+        # 1. Define our symbol fallbacks (v20 standard, Base only, UI standard)
+        base_asset = b.instrument.split('_')[0] if '_' in b.instrument else b.instrument.split('/')[0]
+        quote_asset = b.instrument.split('_')[1] if '_' in b.instrument else 'USD'
+        
+        symbols_to_try = [
+            b.instrument,
+            f"{base_asset}_{quote_asset}",  # e.g., SPX500_USD (Standard v20)
+            base_asset,                     # e.g., SPX500
+            f"{base_asset}/{quote_asset}"   # e.g., SPX500/USD
+        ]
+        # Remove duplicates while preserving order
+        symbols_to_try = list(dict.fromkeys(symbols_to_try))
+
         legs = [("long", b.long_entry, b.long_stop, units),
                 ("short", b.short_entry, b.short_stop, -units)]
+
         for side, entry, stop, signed in legs:
             if side not in b.allowed_sides:
                 continue   # trend filter narrowed this bracket to one side
-            order = {"order": {
-                "type": "STOP",
-                "instrument": b.instrument,
-                "units": str(signed),
-                "price": self._px(b.instrument, entry),
-                "timeInForce": "GTC",
-                "stopLossOnFill": {"price": self._px(b.instrument, stop), "timeInForce": "GTC"},
-                "clientExtensions": {"tag": b.tag, "comment": f"kestrel-{side}"},
-            }}
-            r = requests.post(f"{self.host}/v3/accounts/{self.account}/orders",
-                              headers=self.headers, json=order)
-            oid = r.json().get("orderCreateTransaction", {}).get("id")
-            if oid is None:
-                logging.error(f"OANDA place_oco {side} rejected: {r.text[:300]}")
-                continue
-            if side == "long":
-                handle.long_entry_id = str(oid)
-            else:
-                handle.short_entry_id = str(oid)
+            
+            order_success = False
+            last_error = ""
+
+            for sym in symbols_to_try:
+                order = {"order": {
+                    "type": "STOP",
+                    "instrument": sym,
+                    "units": str(signed),
+                    "price": self._px(sym, entry),
+                    "timeInForce": "GTC",
+                    "stopLossOnFill": {"price": self._px(sym, stop), "timeInForce": "GTC"},
+                    "clientExtensions": {"tag": b.tag, "comment": f"kestrel-{side}"},
+                }}
+                
+                r = requests.post(f"{self.host}/v3/accounts/{self.account}/orders",
+                                  headers=self.headers, json=order)
+                response = r.json()
+
+                # 2. STRICT REJECTION CHECKING
+                if "orderRejectTransaction" in response:
+                    reject_reason = response["orderRejectTransaction"].get("rejectReason", "UNKNOWN_REASON")
+                    logging.error(f"❌ OANDA REJECTED {side.upper()} ORDER for {sym} | Reason: {reject_reason}")
+                    
+                    # If it's rejected for price/distance, the symbol is correct, the math is wrong. Break.
+                    raise ValueError(f"Broker rejected {side} terms: {reject_reason}")
+
+                # 3. Check for invalid symbol or other API errors
+                if "errorMessage" in response:
+                    error_msg = response.get("errorMessage", "")
+                    if "Invalid value specified for 'instrument'" in error_msg or "Invalid instrument" in error_msg:
+                        logging.warning(f"⚠️ Symbol {sym} unrecognized by OANDA. Trying fallback...")
+                        last_error = error_msg
+                        continue
+                    else:
+                        # Other errors like insufficient margin
+                        logging.error(f"❌ API Execution Error for {sym}: {error_msg}")
+                        raise ValueError(f"OANDA API Error: {error_msg}")
+
+                # If we get here, it succeeded!
+                oid = response.get("orderCreateTransaction", {}).get("id")
+                if oid:
+                    logging.info(f"✅ OCO {side.upper()} Leg Deployed Successfully! (ID: {oid})")
+                    if side == "long":
+                        handle.long_entry_id = str(oid)
+                    else:
+                        handle.short_entry_id = str(oid)
+                    handle.instrument = sym  # Save the working symbol
+                    order_success = True
+                    break
+            
+            # If the loop finishes and all symbols failed
+            if not order_success:
+                logging.error(f"❌ Order completely failed for {side}. Last error: {last_error}")
+                raise ValueError(f"All symbol formats invalid for {b.instrument}.")
+
         return handle
 
     # ---- adaptive-management (OANDA v20 REST) ----

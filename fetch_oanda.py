@@ -10,9 +10,9 @@ import requests
 #   macOS/Linux:  export OANDA_API_TOKEN="your-practice-token"
 #   Windows CMD:  set OANDA_API_TOKEN=your-practice-token
 #   Windows PS:   $env:OANDA_API_TOKEN="your-practice-token"
-OANDA_API_TOKEN = os.environ.get("OANDA_API_TOKEN", "7af908ecb60c411d7ffe3ddea09daae0-8cca6595a2c0fc459697e523a5883ada")
+OANDA_API_TOKEN = os.environ.get("OANDA_API_TOKEN", "bbb7bfbba94195c77a1a05b718ad56c1-b326e0775f227e8f1588eaa1b48f3af3")
 ENVIRONMENT = "practice"
-GRANULARITY = "M1"                # 1-minute candles for the Alpha Factory
+GRANULARITY = "M5"                # 1-minute candles for the Alpha Factory
 START       = "2022-01-01T00:00:00Z"
 END         = "2026-06-18T00:00:00Z"
 PRICE       = "BA"                # "BA" = bid & ask candles → allows spread calculation
@@ -20,20 +20,20 @@ PRICE       = "BA"                # "BA" = bid & ask candles → allows spread c
 # EXPANDED: A global sweep of Index CFDs for the Alpha Factory to test
 INSTRUMENTS = [
     # US Markets
-    #("NAS100_USD", "data/NAS100_USD_M1.csv"),
-    #("SPX500_USD", "data/SPX500_USD_M1.csv"),
-    ("US2000_USD", "data/US2000_USD_M1.csv"),
-    ("US30_USD",   "data/US30_USD_M1.csv"),   # Dow Jones
+    #("NAS100_USD", "data_oanda/NAS100_USD_M1.csv"),
+    #("SPX500_USD", "data_oanda/SPX500_USD_M1.csv"),
+    #("US2000_USD", "data_oanda/US2000_USD_M1.csv"),
+    #("US30_USD",   "data_oanda/US30_USD_M1.csv"),   # Dow Jones
     
     # European Markets
-    ("DE30_EUR",   "data/DE30_EUR_M1.csv"),   # DAX (Some OANDA accounts use DE40_EUR instead)
-    ("UK100_GBP",  "data/UK100_GBP_M1.csv"),  # FTSE 100
-    ("EU50_EUR",   "data/EU50_EUR_M1.csv"),   # Euro Stoxx 50
+    #("DE30_EUR",   "data_oanda/DE30_EUR_M1.csv"),   # DAX (Some OANDA accounts use DE40_EUR instead)
+    #("UK100_GBP",  "data_oanda/UK100_GBP_M1.csv"),  # FTSE 100
+    #("EU50_EUR",   "data_oanda/EU50_EUR_M1.csv"),   # Euro Stoxx 50
     
     # Asian/Pacific Markets
-    ("JP225_USD",  "data/JP225_USD_M1.csv"),  # Nikkei 225
-    ("HK33_HKD",   "data/HK33_HKD_M1.csv"),   # Hang Seng
-    ("AU200_AUD",  "data/AU200_AUD_M1.csv")   # ASX 200
+    #("JP225_USD",  "data_oanda/JP225_USD_M1.csv"),  # Nikkei 225
+    #("HK33_HKD",   "data_oanda/HK33_HKD_M1.csv"),   # Hang Seng
+    ("BTC_USD",  "data_oanda/BTC_USD_M5.csv")   # ASX 200
 ]
 # =================================================
 
